@@ -1,0 +1,74 @@
+name: Build/Scan/Push Containers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - [$default-branch]
+    paths:
+      - ${{ vars.DOCKERFILE_PATH }}/**
+  pull_request:
+    branches:
+      - [$default-branch]
+    paths:
+      - ${{ vars.DOCKERFILE_PATH }}/**
+
+jobs:
+  docker_build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Collect Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ vars.IMAGE_REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ vars.IMAGE_TAG }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Login to ACR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.IMAGE_REGISTRY }}
+          username: ${{ secrets.IMAGE_REGISTRY_USERNAME }}
+          password: ${{ secrets.IMAGE_REGISTRY_PASSWORD }}
+
+      - name: Build and Publish to Docker
+        id: build-and-push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          context: ${{ vars.DOCKERFILE_PATH }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ vars.IMAGE_REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ vars.IMAGE_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Integrate CI data with Wiz
+        run: |
+          docker pull ${{ vars.IMAGE_REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ vars.IMAGE_TAG }}
+          if [[ ! -z "${{ vars.WIZ_ENV }}" && "${{ vars.WIZ_ENV }}" != "app" ]]; then export WIZ_ENV=${{ vars.WIZ_ENV }}; fi
+          curl -Lo wizcli https://wizcli.app.wiz.io/latest/wizcli-linux-amd64
+          chmod +x wizcli
+          ./wizcli auth --id "${{ secrets.WIZ_CLIENT_ID }}" --secret "${{ secrets.WIZ_CLIENT_SECRET }}"
+          ./wizcli docker scan --image ${{ vars.IMAGE_REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ vars.IMAGE_TAG }} --dockerfile "${{ vars.DOCKERFILE_PATH }}"
+          ./wizcli docker tag --image ${{ vars.IMAGE_REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ vars.IMAGE_TAG }}
